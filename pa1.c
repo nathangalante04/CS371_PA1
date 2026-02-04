@@ -19,7 +19,7 @@
 /* 
 Please specify the group members here
 # Student #1: Nathan Galante
-# Student #2:
+# Student #2: David Eliassen
 # Student #3: 
 */
 
