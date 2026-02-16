@@ -88,6 +88,14 @@ void run_client() {
     client_thread_data_t thread_data[num_client_threads];
     struct sockaddr_in server_addr;
 
+    memset(&server_addr, 0, sizeof(server_addr));
+    server_addr.sin_family = AF_INET;
+    server_addr.sin_port = htons(server_port);
+    if (inet_pton(AF_INET, server_ip, &server_addr.sin_addr) != 1) {
+        fprintf(stderr, "Invalid server IP: %s\n", server_ip);
+        return;
+    }
+
     /* TODO:
      * Create sockets and epoll instances for client threads
      * and connect these sockets of client threads to the server
@@ -96,12 +104,57 @@ void run_client() {
     // Hint: use thread_data to save the created socket and epoll instance for each thread
     // You will pass the thread_data to pthread_create() as below
     for (int i = 0; i < num_client_threads; i++) {
+
+        int sockfd = socket(AF_INET, SOCK_STREAM, 0);
+        if (sockfd < 0) {
+            perror("client socket");
+            return;
+        }
+
+        if (connect(sockfd, (struct sockaddr *)&server_addr, sizeof(server_addr)) < 0) {
+            perror("client connect");
+            close(sockfd);
+            return;
+        }
+
+        int epfd = epoll_create1(0);
+        if (epfd < 0) {
+            perror("client epoll_create1");
+            close(sockfd);
+            return;
+        }
+
+        thread_data[i].socket_fd = sockfd;
+        thread_data[i].epoll_fd = epfd;
+        thread_data[i].total_rtt = 0;
+        thread_data[i].total_messages = 0;
+        thread_data[i].request_rate = 0.0f;
+
         pthread_create(&threads[i], NULL, client_thread_func, &thread_data[i]);
     }
 
     /* TODO:
      * Wait for client threads to complete and aggregate metrics of all client threads
      */
+
+    long long total_rtt = 0;
+    long total_messages = 0;
+    float total_request_rate = 0.0f;
+
+    for (int i = 0; i < num_client_threads; i++) {
+        pthread_join(threads[i], NULL);
+        total_rtt += thread_data[i].total_rtt;
+        total_messages += thread_data[i].total_messages;
+        total_request_rate += thread_data[i].request_rate;
+
+        close(thread_data[i].socket_fd);
+        close(thread_data[i].epoll_fd);
+    }
+
+    if (total_messages == 0) {
+        printf("No messages were sent or received.\n");
+        return;
+    }
 
     printf("Average RTT: %lld us\n", total_rtt / total_messages);
     printf("Total Request Rate: %f messages/s\n", total_request_rate);
