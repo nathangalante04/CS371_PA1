@@ -166,14 +166,135 @@ void run_server() {
      * Server creates listening socket and epoll instance.
      * Server registers the listening socket to epoll
      */
+    int listen_fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (listen_fd < 0) {
+        perror("server socket");
+        return;
+    }
 
+    int opt = 1;
+    if (setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0) {
+        perror("server setsockopt");
+        close(listen_fd);
+        return;
+    }
+
+    int flags = fcntl(listen_fd, F_GETFL, 0);
+    if (flags >= 0) fcntl(listen_fd, F_SETFL, flags | O_NONBLOCK);
+
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(server_port);
+    if (inet_pton(AF_INET, server_ip, &addr.sin_addr) != 1) {
+        fprintf(stderr, "Invalid bind IP: %s\n", server_ip);
+        close(listen_fd);
+        return;
+    }
+
+    if (bind(listen_fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+        perror("server bind");
+        close(listen_fd);
+        return;
+    }
+
+    if (listen(listen_fd, 1024) < 0) {
+        perror("server listen");
+        close(listen_fd);
+        return;
+    }
+
+    int epfd = epoll_create1(0);
+    if (epfd < 0) {
+        perror("server epoll_create1");
+        close(listen_fd);
+        return;
+    }
+
+    struct epoll_event ev;
+    memset(&ev, 0, sizeof(ev));
+    ev.events = EPOLLIN;
+    ev.data.fd = listen_fd;
+
+    if (epoll_ctl(epfd, EPOLL_CTL_ADD, listen_fd, &ev) < 0) {
+        perror("server epoll_ctl ADD listen_fd");
+        close(epfd);
+        close(listen_fd);
+        return;
+    }
+
+    struct epoll_event events[MAX_EVENTS];
+    
     /* Server's run-to-completion event loop */
     while (1) {
         /* TODO:
          * Server uses epoll to handle connection establishment with clients
          * or receive the message from clients and echo the message back
          */
+        int nfds = epoll_wait(epfd, events, MAX_EVENTS, -1);
+        if (nfds < 0) {
+            if (errno == EINTR) continue;
+            perror("server epoll_wait");
+            break;
+        }
+
+        for (int i = 0; i < nfds; i++) {
+            int fd = events[i].data.fd;
+
+            if (fd == listen_fd) {
+                while (1) {
+                    struct sockaddr_in caddr;
+                    socklen_t clen = sizeof(caddr);
+                    int cfd = accept(listen_fd, (struct sockaddr *)&caddr, &clen);
+                    if (cfd < 0) {
+                        if (errno == EAGAIN || errno == EWOULDBLOCK) break;
+                        perror("server accept");
+                        break;
+                    }
+
+                    int cflags = fcntl(cfd, F_GETFL, 0);
+                    if (cflags >= 0) fcntl(cfd, F_SETFL, cflags | O_NONBLOCK);
+
+                    struct epoll_event cev;
+                    memset(&cev, 0, sizeof(cev));
+                    cev.events = EPOLLIN;
+                    cev.data.fd = cfd;
+
+                    if (epoll_ctl(epfd, EPOLL_CTL_ADD, cfd, &cev) < 0) {
+                        perror("server epoll_ctl ADD client");
+                        close(cfd);
+                        continue;
+                    }
+                }
+            } else {
+                char buf[MESSAGE_SIZE];
+                int n = (int)recv(fd, buf, MESSAGE_SIZE, 0);
+                if (n <= 0) {
+                    if (n < 0 && (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK)) {
+                        continue;
+                    }
+                    epoll_ctl(epfd, EPOLL_CTL_DEL, fd, NULL);
+                    close(fd);
+                    continue;
+                }
+
+                int sent = 0;
+                while (sent < n) {
+                    int m = (int)send(fd, buf + sent, n - sent, MSG_NOSIGNAL);
+                    if (m < 0) {
+                        if (errno == EINTR) continue;
+                        if (errno == EAGAIN || errno == EWOULDBLOCK) continue;
+                        epoll_ctl(epfd, EPOLL_CTL_DEL, fd, NULL);
+                        close(fd);
+                        break;
+                    }
+                    sent += m;
+                }
+            }
+        }
     }
+    close(epfd);
+    close(listen_fd);
 }
 
 int main(int argc, char *argv[]) {
