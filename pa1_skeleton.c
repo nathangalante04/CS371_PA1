@@ -16,7 +16,7 @@
 # SPDX-License-Identifier: Apache-2.0
 */
 
-/* 
+/*
 Please specify the group members here
 # Student #1: Nathan Galante
 # Student #2: David Eliassen
@@ -32,6 +32,8 @@ Please specify the group members here
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <pthread.h>
+#include <fcntl.h>
+#include <errno.h>
 
 #define MAX_EVENTS 64
 #define MESSAGE_SIZE 16
@@ -66,15 +68,83 @@ void *client_thread_func(void *arg) {
     // Hint 1: register the "connected" client_thread's socket in the its epoll instance
     // Hint 2: use gettimeofday() and "struct timeval start, end" to record timestamp, which can be used to calculated RTT.
 
+    memset(&event, 0, sizeof(event));
+    event.events = EPOLLIN;
+    event.data.fd = data->socket_fd;
+    if (epoll_ctl(data->epoll_fd, EPOLL_CTL_ADD, data->socket_fd, &event) < 0) {
+        perror("client epoll_ctl ADD");
+        return NULL;
+    }
+
+    data->total_rtt = 0;
+    data->total_messages = 0;
+    data->request_rate = 0.0f;
+
     /* TODO:
      * It sends messages to the server, waits for a response using epoll,
      * and measures the round-trip time (RTT) of this request-response.
      */
- 
+
+    for (int i = 0; i < num_requests; i++) {
+        gettimeofday(&start, NULL);
+
+        int sent = 0;
+        while (sent < MESSAGE_SIZE) {
+            int n = (int)send(data->socket_fd, send_buf + sent, MESSAGE_SIZE - sent, MSG_NOSIGNAL);
+            if (n < 0) {
+                if (errno == EINTR) continue;
+                perror("client send");
+                return NULL;
+            }
+            sent += n;
+        }
+
+        int nfds;
+        while (1) {
+            nfds = epoll_wait(data->epoll_fd, events, MAX_EVENTS, -1);
+            if (nfds < 0 && errno == EINTR) continue;
+            break;
+        }
+        if (nfds < 0) {
+            perror("client epoll_wait");
+            return NULL;
+        }
+
+        int recvd = 0;
+        while (recvd < MESSAGE_SIZE) {
+            int n = (int)recv(data->socket_fd, recv_buf + recvd, MESSAGE_SIZE - recvd, 0);
+            if (n < 0) {
+                if (errno == EINTR) continue;
+                perror("client recv");
+                return NULL;
+            }
+            if (n == 0) {
+                return NULL;
+            }
+            recvd += n;
+        }
+
+        gettimeofday(&end, NULL);
+
+        long long rtt_us =
+            (long long)(end.tv_sec - start.tv_sec) * 1000000LL +
+            (long long)(end.tv_usec - start.tv_usec);
+
+        data->total_rtt += rtt_us;
+        data->total_messages += 1;
+    }
+
+
     /* TODO:
-     * The function exits after sending and receiving a predefined number of messages (num_requests). 
+     * The function exits after sending and receiving a predefined number of messages (num_requests).
      * It calculates the request rate based on total messages and RTT
      */
+
+    if (data->total_rtt > 0) {
+        data->request_rate = (float)((double)data->total_messages * 1000000.0 / (double)data->total_rtt);
+    } else {
+        data->request_rate = 0.0f;
+    }
 
     return NULL;
 }
@@ -100,7 +170,7 @@ void run_client() {
      * Create sockets and epoll instances for client threads
      * and connect these sockets of client threads to the server
      */
-    
+
     // Hint: use thread_data to save the created socket and epoll instance for each thread
     // You will pass the thread_data to pthread_create() as below
     for (int i = 0; i < num_client_threads; i++) {
@@ -224,7 +294,7 @@ void run_server() {
     }
 
     struct epoll_event events[MAX_EVENTS];
-    
+
     /* Server's run-to-completion event loop */
     while (1) {
         /* TODO:
